@@ -1,0 +1,40 @@
+# 다시장 운영 구성: 앱 + PostgreSQL (+ 선택: Nginx는 deploy/nginx.conf 참고)
+# 실행: docker compose up -d --build
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      DB_DRIVER: postgres
+      DATABASE_URL: postgres://dasijang:${DB_PASSWORD:-dasijang}@db:5432/dasijang
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET을 .env에 설정하세요}
+      ADMIN_NAME: ${ADMIN_NAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD를 .env에 설정하세요}
+      PAYMENT_MODE: ${PAYMENT_MODE:-mock}
+      TOSS_CLIENT_KEY: ${TOSS_CLIENT_KEY:-}
+      TOSS_SECRET_KEY: ${TOSS_SECRET_KEY:-}
+    volumes:
+      - uploads:/app/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: dasijang
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-dasijang}
+      POSTGRES_DB: dasijang
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dasijang"]
+      interval: 5s
+      retries: 10
+
+volumes:
+  pgdata:
+  uploads:
