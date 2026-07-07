@@ -2,8 +2,11 @@
 "use strict";
 
 const $app = document.getElementById("app");
-const S = { token: localStorage.getItem("token"), me: null, view: { name: "feed" }, tab: "home", poll: null };
+const S = { me: null, view: { name: "feed" }, tab: "home", poll: null }; // 세션은 httpOnly 쿠키가 담당 (JS로 토큰 접근 불가)
 
+// 외부 링크 감지 → 피싱 경고 표시용 (보안 진단서 §5)
+const hasUrl = (t) => /(https?:\/\/|www\.)\S+|[a-z0-9-]+\.(com|net|org|kr|co|io|me|shop|link|xyz|site)(\/\S*)?/i.test(String(t || ""));
+const LINK_WARN = `<span class="linkwarn">⚠️ 외부 링크 주의 — 다시장 밖에서의 결제·개인정보 요구는 사기일 수 있어요. 안전거래는 앱 안에서만!</span>`;
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const won = (n) => Number(n).toLocaleString("ko-KR") + "원";
 const timeOf = (iso) => (iso ? iso.slice(11, 16) : "");
@@ -15,24 +18,44 @@ function toast(msg) {
 }
 
 /* ── API 헬퍼 ── */
+function getCookie(name) {
+  const m = document.cookie.match(new RegExp("(?:^|; )" + name + "=([^;]*)"));
+  return m ? decodeURIComponent(m[1]) : null;
+}
+
 async function api(path, { method = "GET", body, form } = {}) {
   const headers = {};
-  if (S.token) headers.Authorization = "Bearer " + S.token;
   if (body) headers["Content-Type"] = "application/json";
+  // CSRF: 상태변경 요청에는 csrf 쿠키값을 헤더로도 함께 전송 (double-submit)
+  const authPath = path === "/auth/login" || path === "/auth/signup";
+  if (method !== "GET" && method !== "HEAD" && !authPath) {
+    const csrf = getCookie("csrf");
+    // csrf 쿠키가 없으면 = 예전 버전에서 로그인된 낡은 세션. 재로그인해야 발급되므로 즉시 유도.
+    if (!csrf) {
+      S.me = null; renderAuth();
+      throw new Error("세션이 오래되었습니다. 다시 로그인해 주세요.");
+    }
+    headers["X-CSRF-Token"] = csrf;
+  }
   const res = await fetch("/api" + path, { method, headers, body: form || (body ? JSON.stringify(body) : undefined) });
   const data = await res.json().catch(() => ({}));
-  if (res.status === 401) { logout(false); throw new Error(data.error || "로그인이 필요합니다."); }
+  if (res.status === 401) { S.me = null; renderAuth(); throw new Error(data.error || "로그인이 필요합니다."); }
   if (res.status === 403 && data.blocked) { S.blockedScreen = true; render(); throw new Error(data.error); }
+  // CSRF 토큰 불일치(403)도 재로그인으로 복구
+  if (res.status === 403 && /보안 토큰/.test(data.error || "")) {
+    S.me = null; renderAuth();
+    throw new Error("세션이 오래되었습니다. 다시 로그인해 주세요.");
+  }
   if (!res.ok) throw new Error(data.error || "요청에 실패했습니다.");
   return data;
 }
 
-function logout(manual = true) {
-  localStorage.removeItem("token");
-  S.token = null; S.me = null; S.blockedScreen = false;
-  go("feed", {}, "home");
+async function logout(manual = true) {
+  try { await fetch("/api/auth/logout", { method: "POST" }); } catch { /* 쿠키 만료 등 */ }
+  S.me = null; S.blockedScreen = false;
+  S.view = { name: "feed" }; S.tab = "home";
   if (manual) toast("로그아웃했습니다.");
-  render();
+  renderAuth();
 }
 
 function go(name, data = {}, tab) {
@@ -44,10 +67,9 @@ function go(name, data = {}, tab) {
 
 /* ── 렌더 디스패처 ── */
 async function render() {
-  if (!S.token) return renderAuth();
   if (S.blockedScreen) return renderBlocked();
   if (!S.me) {
-    try { S.me = (await api("/auth/me")).user; } catch { return; }
+    try { S.me = (await api("/auth/me")).user; } catch { return; } // 401이면 api()가 로그인 화면 표시
   }
   const views = { feed: viewFeed, detail: viewDetail, sell: viewSell, chatList: viewChatList, chatRoom: viewChatRoom, globalChat: viewGlobalChat, wallet: viewWallet, my: viewMy, profile: viewProfile, admin: viewAdmin };
   $app.innerHTML = shell();
@@ -116,8 +138,7 @@ function renderAuth() {
         method: "POST",
         body: { name: document.getElementById("aName").value, password: document.getElementById("aPw").value },
       });
-      S.token = data.token; S.me = data.user;
-      localStorage.setItem("token", data.token);
+      S.me = data.user; // 토큰은 서버가 httpOnly 쿠키로 심어줌 — JS는 저장하지 않음
       go("feed", {}, "home");
     } catch (e) { err.textContent = e.message; err.style.display = "block"; }
   };
@@ -190,6 +211,7 @@ async function viewDetail(main) {
           </div>
           <div class="meta"><a href="#" id="sellerLink" style="color:var(--primary);font-weight:700;text-decoration:underline">${esc(p.seller_name)}</a> · ${esc(p.category)} · ${esc(p.created_at.slice(0, 16))}</div>
           <p style="font-size:14px;line-height:1.6;margin-top:14px;white-space:pre-wrap">${esc(p.description) || "설명이 없습니다."}</p>
+          ${hasUrl(p.description) ? LINK_WARN : ""}
           ${p.status === "sold" ? `<p class="meta" style="margin-top:12px;font-weight:700">이미 판매가 완료된 상품입니다.</p>` : ""}
           ${p.status === "blocked" ? `<p class="meta" style="margin-top:12px;font-weight:700;color:var(--danger)">관리자에 의해 차단된 상품입니다.</p>` : ""}
         </div>
@@ -336,7 +358,7 @@ async function viewGlobalChat(main) {
       const mine = m.sender_id === S.me.id;
       const div = document.createElement("div");
       div.className = "bubble " + (mine ? "me" : "other");
-      div.innerHTML = `${mine ? "" : `<span style="display:block;font-size:11px;font-weight:700;opacity:.7;margin-bottom:2px">${esc(m.sender_name)}</span>`}${esc(m.text)}<span class="t">${timeOf(m.created_at)}</span>`;
+      div.innerHTML = `${mine ? "" : `<span style="display:block;font-size:11px;font-weight:700;opacity:.7;margin-bottom:2px">${esc(m.sender_name)}</span>`}${esc(m.text)}${hasUrl(m.text) ? LINK_WARN : ""}<span class="t">${timeOf(m.created_at)}</span>`;
       box.appendChild(div);
     }
     if (list.length) box.scrollTop = box.scrollHeight;
@@ -426,7 +448,7 @@ async function viewChatRoom(main) {
       lastId = Math.max(lastId, m.id);
       const div = document.createElement("div");
       div.className = "bubble " + (m.sender_id === S.me.id ? "me" : "other");
-      div.innerHTML = `${esc(m.text)}<span class="t">${timeOf(m.created_at)}</span>`;
+      div.innerHTML = `${esc(m.text)}${hasUrl(m.text) ? LINK_WARN : ""}<span class="t">${timeOf(m.created_at)}</span>`;
       box.appendChild(div);
     }
     if (list.length) box.scrollTop = box.scrollHeight;
@@ -638,6 +660,7 @@ async function viewMy(main) {
 /* ═══ 관리자 콘솔 ═══ */
 async function viewAdmin(main) {
   S.adminSec = S.adminSec || "reports";
+  S.adminPage = S.adminPage || 1;
   const load = async () => {
     const sum = await api("/admin/summary");
     const secs = [["reports", `신고${sum.open_reports ? ` (${sum.open_reports})` : ""}`], ["users", "유저"], ["products", "상품"], ["orders", "주문"], ["transactions", "거래"]];
@@ -654,11 +677,23 @@ async function viewAdmin(main) {
         </div>
         <div id="adminBody" class="stack" style="margin-bottom:16px"></div>
       </div>`;
-    main.querySelectorAll("[data-sec]").forEach((b) => (b.onclick = () => { S.adminSec = b.dataset.sec; load(); }));
+    main.querySelectorAll("[data-sec]").forEach((b) => (b.onclick = () => { S.adminSec = b.dataset.sec; S.adminPage = 1; load(); }));
     const body = document.getElementById("adminBody");
+    const PG = `&page=${S.adminPage}`;
+    const pager = (count) => {
+      const div = document.createElement("div");
+      div.style.cssText = "display:flex;gap:8px;justify-content:center;margin-top:4px";
+      div.innerHTML = `${S.adminPage > 1 ? `<button class="btn ghost sm" id="pgPrev">← 이전</button>` : ""}
+        <span class="meta" style="align-self:center">${S.adminPage} 페이지</span>
+        ${count >= 100 ? `<button class="btn ghost sm" id="pgNext">다음 →</button>` : ""}`;
+      body.after(div);
+      const pv = document.getElementById("pgPrev"), nx = document.getElementById("pgNext");
+      if (pv) pv.onclick = () => { S.adminPage--; load(); };
+      if (nx) nx.onclick = () => { S.adminPage++; load(); };
+    };
 
     if (S.adminSec === "reports") {
-      const { reports } = await api("/admin/reports");
+      const { reports } = await api("/admin/reports?x=1" + PG); pager(reports.length);
       body.innerHTML = reports.length === 0 ? `<p class="empty">접수된 신고가 없습니다.</p>` : reports.map((r) => `
         <div class="card" style="padding:13px;border-color:${r.resolved ? "var(--line)" : "var(--danger)"}">
           <div style="display:flex;justify-content:space-between">
@@ -679,7 +714,7 @@ async function viewAdmin(main) {
     }
 
     if (S.adminSec === "users") {
-      const { users } = await api("/admin/users");
+      const { users } = await api("/admin/users?x=1" + PG); pager(users.length);
       body.innerHTML = users.length === 0 ? `<p class="empty">가입한 유저가 없습니다.</p>` : users.map((u) => `
         <div class="card row" style="justify-content:space-between">
           <div>
@@ -702,7 +737,7 @@ async function viewAdmin(main) {
     }
 
     if (S.adminSec === "products") {
-      const { products } = await api("/admin/products");
+      const { products } = await api("/admin/products?x=1" + PG); pager(products.length);
       body.innerHTML = products.length === 0 ? `<p class="empty">등록된 상품이 없습니다.</p>` : products.map((p) => `
         <div class="card row" style="justify-content:space-between">
           <div style="display:flex;gap:10px;align-items:center;min-width:0">
@@ -721,7 +756,7 @@ async function viewAdmin(main) {
     }
 
     if (S.adminSec === "orders") {
-      const { orders } = await api("/admin/orders");
+      const { orders } = await api("/admin/orders?x=1" + PG); pager(orders.length);
       body.innerHTML = orders.length === 0 ? `<p class="empty">주문이 없습니다.</p>` : orders.map((o) => `
         <div class="card row" style="justify-content:space-between">
           <div>
@@ -737,7 +772,7 @@ async function viewAdmin(main) {
     }
 
     if (S.adminSec === "transactions") {
-      const { transactions } = await api("/admin/transactions");
+      const { transactions } = await api("/admin/transactions?x=1" + PG); pager(transactions.length);
       body.innerHTML = transactions.length === 0 ? `<p class="empty">거래 내역이 없습니다.</p>` : transactions.map((t) => `
         <div class="card" style="padding:12px">
           <div class="title" style="font-size:13px">${esc(t.from_name || "외부/에스크로")} → ${esc(t.to_name || "에스크로")} · ${won(t.amount)}</div>
@@ -750,7 +785,7 @@ async function viewAdmin(main) {
 
 /* ── 토스 결제 리다이렉트 처리 ── */
 (async function handlePaymentRedirect() {
-  if (location.pathname === "/payment/success" && S.token) {
+  if (location.pathname === "/payment/success") {
     const q = new URLSearchParams(location.search);
     try {
       await api("/payments/charges/toss-confirm", {

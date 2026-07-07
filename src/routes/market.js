@@ -8,18 +8,33 @@ const { auth, h } = require("../middleware");
 
 const CATEGORIES = ["디지털", "가구", "생활", "패션", "기타"];
 
-/* ── 이미지 업로드 (5MB, 이미지 파일만) ── */
+/* ── 이미지 업로드 (5MB) — 보안 진단서 §1 대응 ──
+   · 저장 시 클라이언트 파일명/확장자를 신뢰하지 않음 (확장자 없이 임시 저장)
+   · 업로드 후 파일 "내용"의 시그니처(매직 바이트)를 검사해 진짜 이미지인지 확인
+   · 확장자는 검증된 포맷에 따라 서버가 부여 → .html 등 위장 파일 저장 원천 차단 */
 const UPLOAD_DIR = path.join(__dirname, "..", "..", "uploads");
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 const upload = multer({
   storage: multer.diskStorage({
     destination: UPLOAD_DIR,
-    filename: (_req, file, cb) =>
-      cb(null, Date.now() + "-" + Math.round(Math.random() * 1e9) + path.extname(file.originalname).toLowerCase()),
+    filename: (_req, _file, cb) => cb(null, Date.now() + "-" + Math.round(Math.random() * 1e9)), // 확장자 없음
   }),
   limits: { fileSize: 5 * 1024 * 1024 },
-  fileFilter: (_req, file, cb) => cb(null, /^image\//.test(file.mimetype)),
 });
+
+// 파일 첫 바이트로 실제 포맷 판별 (jpg/png/gif/webp만 허용)
+function detectImageExt(filePath) {
+  const buf = Buffer.alloc(12);
+  const fd = fs.openSync(filePath, "r");
+  fs.readSync(fd, buf, 0, 12, 0);
+  fs.closeSync(fd);
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return "jpg";
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return "png";
+  if (buf.toString("ascii", 0, 4) === "GIF8") return "gif";
+  if (buf.toString("ascii", 0, 4) === "RIFF" && buf.toString("ascii", 8, 12) === "WEBP") return "webp";
+  return null;
+}
+const dropFile = (f) => { if (f) { try { fs.unlinkSync(f.path); } catch { /* 이미 없음 */ } } };
 
 /* ═══ 상품 ═══ */
 
@@ -48,17 +63,36 @@ router.get("/products/:id", auth, h(async (req, res) => {
   res.json({ product: p });
 }));
 
-// 등록 (multipart, image 선택)
+// 등록 (multipart, image 선택) — 매직 바이트 검증 + 1일 등록 한도 (진단서 §1, §4)
 router.post("/products", auth, upload.single("image"), h(async (req, res) => {
   const title = String(req.body.title || "").trim();
   const price = parseInt(req.body.price, 10);
   const category = CATEGORIES.includes(req.body.category) ? req.body.category : "기타";
   const description = String(req.body.description || "").trim();
-  if (!title || title.length > 60) return res.status(400).json({ error: "상품명을 1~60자로 입력해 주세요." });
-  if (!Number.isInteger(price) || price <= 0 || price > 100_000_000)
-    return res.status(400).json({ error: "가격은 1원 이상 1억원 이하로 입력해 주세요." });
+  if (!title || title.length > 60) { dropFile(req.file); return res.status(400).json({ error: "상품명을 1~60자로 입력해 주세요." }); }
+  if (!Number.isInteger(price) || price <= 0 || price > 100_000_000) {
+    dropFile(req.file); return res.status(400).json({ error: "가격은 1원 이상 1억원 이하로 입력해 주세요." });
+  }
 
-  const image = req.file ? "/uploads/" + req.file.filename : null;
+  // 1일 게시글 한도: 삭제분 포함 오늘 등록 수 집계 (지웠다 다시 올리는 우회 방지)
+  const DAILY = parseInt(process.env.DAILY_POST_LIMIT || "30", 10);
+  const today = new Date().toLocaleDateString("sv-SE"); // YYYY-MM-DD
+  const { n } = await q.get("SELECT COUNT(*) AS n FROM products WHERE seller_id = ? AND created_at LIKE ?", req.user.id, today + "%");
+  if (Number(n) >= DAILY) {
+    dropFile(req.file);
+    return res.status(429).json({ error: `하루 등록 한도(${DAILY}개)를 모두 사용했습니다. 내일 다시 등록해 주세요.` });
+  }
+
+  // 이미지 검증: 헤더가 아닌 파일 내용으로 판별하고, 확장자는 서버가 부여
+  let image = null;
+  if (req.file) {
+    const ext = detectImageExt(req.file.path);
+    if (!ext) { dropFile(req.file); return res.status(400).json({ error: "jpg, png, gif, webp 이미지 파일만 업로드할 수 있습니다." }); }
+    const finalName = req.file.filename + "." + ext;
+    fs.renameSync(req.file.path, path.join(UPLOAD_DIR, finalName));
+    image = "/uploads/" + finalName;
+  }
+
   const id = await q.insert(
     "INSERT INTO products (seller_id, title, price, category, description, image) VALUES (?,?,?,?,?,?)",
     req.user.id, title, price, category, description, image);
@@ -101,7 +135,7 @@ router.get("/chats", auth, h(async (req, res) => {
     JOIN users b ON b.id = c.buyer_id
     JOIN users s ON s.id = p.seller_id
     WHERE c.buyer_id = ? OR p.seller_id = ?
-    ORDER BY COALESCE(last_at, c.created_at) DESC`, req.user.id, req.user.id);
+    ORDER BY COALESCE(last_at, c.created_at) DESC LIMIT 100`, req.user.id, req.user.id);
   res.json({ chats });
 }));
 
@@ -118,7 +152,7 @@ router.get("/chats/:id/messages", auth, h(async (req, res) => {
     return res.status(403).json({ error: "참여 중인 대화방이 아닙니다." });
   const after = parseInt(req.query.after || "0", 10);
   const messages = await q.all(
-    "SELECT m.*, u.name AS sender_name FROM messages m JOIN users u ON u.id = m.sender_id WHERE chat_id = ? AND m.id > ? ORDER BY m.id",
+    "SELECT m.*, u.name AS sender_name FROM messages m JOIN users u ON u.id = m.sender_id WHERE chat_id = ? AND m.id > ? ORDER BY m.id LIMIT 500",
     chat.id, after);
   res.json({ chat, messages });
 }));
@@ -143,12 +177,31 @@ router.get("/users/:id", auth, h(async (req, res) => {
   if (!u || ((u.blocked || u.dormant) && !req.user.is_admin))
     return res.status(404).json({ error: "사용자를 찾을 수 없습니다." });
   const products = await q.all(
-    "SELECT id, title, price, image, status, created_at FROM products WHERE seller_id = ? AND status IN ('active','sold') ORDER BY id DESC",
+    "SELECT id, title, price, image, status, created_at FROM products WHERE seller_id = ? AND status IN ('active','sold') ORDER BY id DESC LIMIT 100",
     u.id);
   res.json({ user: { id: u.id, name: u.name, bio: u.bio || "", created_at: u.created_at }, products });
 }));
 
 /* ═══ 전체 채팅: 모든 유저가 참여하는 공용 채팅방 ═══ */
+// 도배 방지: 유저당 최소 전송 간격 (기본 1.5초) + 10초당 최대 8건
+const gchatHits = new Map(); // userId → [timestamps]
+setInterval(() => {
+  const cut = Date.now() - 10000;
+  for (const [k, arr] of gchatHits) {
+    const kept = arr.filter((t) => t > cut);
+    if (kept.length) gchatHits.set(k, kept); else gchatHits.delete(k);
+  }
+}, 60000).unref();
+function gchatAllowed(userId) {
+  const now = Date.now();
+  const arr = (gchatHits.get(userId) || []).filter((t) => now - t < 10000);
+  if (arr.length >= 8) return false;               // 10초당 8건 초과 차단
+  if (arr.length && now - arr[arr.length - 1] < 1500) return false; // 최소 1.5초 간격
+  arr.push(now);
+  gchatHits.set(userId, arr);
+  return true;
+}
+
 router.get("/global-chat", auth, h(async (req, res) => {
   const after = parseInt(req.query.after || "0", 10);
   const messages = await q.all(
@@ -160,6 +213,8 @@ router.get("/global-chat", auth, h(async (req, res) => {
 router.post("/global-chat", auth, h(async (req, res) => {
   const text = String(req.body.text || "").trim();
   if (!text || text.length > 500) return res.status(400).json({ error: "메시지는 1~500자로 입력해 주세요." });
+  if (!gchatAllowed(req.user.id))
+    return res.status(429).json({ error: "메시지를 너무 빠르게 보내고 있어요. 잠시 후 다시 시도해 주세요." });
   const id = await q.insert("INSERT INTO global_messages (sender_id, text) VALUES (?, ?)", req.user.id, text);
   res.status(201).json({ id });
 }));
@@ -170,10 +225,20 @@ router.post("/reports", auth, h(async (req, res) => {
   const targetId = parseInt(req.body.target_id, 10);
   const reason = String(req.body.reason || "").trim();
   if (!kind || !targetId || !reason) return res.status(400).json({ error: "신고 대상과 사유를 입력해 주세요." });
+  // 자기 자신/본인 상품 신고 차단 (자동 제재 카운트 조작 방지)
+  if (kind === "user") {
+    if (targetId === req.user.id) return res.status(400).json({ error: "자기 자신은 신고할 수 없습니다." });
+  } else {
+    const own = await q.get("SELECT seller_id FROM products WHERE id = ?", targetId);
+    if (own && own.seller_id === req.user.id) return res.status(400).json({ error: "본인 상품은 신고할 수 없습니다." });
+  }
   const exists = kind === "user"
-    ? await q.get("SELECT id FROM users WHERE id = ?", targetId)
+    ? await q.get("SELECT id FROM users WHERE id = ? AND is_admin = 0", targetId) // 관리자는 신고 대상 아님
     : await q.get("SELECT id FROM products WHERE id = ?", targetId);
   if (!exists) return res.status(404).json({ error: "신고 대상을 찾을 수 없습니다." });
+  // 같은 신고자의 중복 신고 차단 (DISTINCT 카운트 우회 및 도배 방지)
+  const dup = await q.get("SELECT id FROM reports WHERE kind = ? AND target_id = ? AND reporter_id = ?", kind, targetId, req.user.id);
+  if (dup) return res.status(409).json({ error: "이미 신고한 대상입니다." });
   await q.run("INSERT INTO reports (kind, target_id, reporter_id, reason) VALUES (?,?,?,?)", kind, targetId, req.user.id, reason);
 
   // 자동 제재: 서로 다른 신고자 수가 임계값(기본 3명) 이상이면

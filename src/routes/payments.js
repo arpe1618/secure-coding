@@ -41,13 +41,16 @@ router.post("/charges", auth, h(async (req, res) => {
   });
 }));
 
-// 2-a) 모의 결제 승인 (개발용)
-router.post("/charges/mock-confirm", auth, h(async (req, res) => {
-  if (MODE !== "mock") return res.status(400).json({ error: "모의 결제 모드가 아닙니다." });
-  const c = await completeCharge(String(req.body.order_no || ""), "mock");
-  if (c.user_id !== req.user.id) return res.status(403).json({ error: "본인 충전 건이 아닙니다." });
-  res.json({ ok: true, amount: c.amount });
-}));
+// 2-a) 모의 결제 승인 (개발용) — mock 모드에서만 라우트를 등록한다.
+//   toss(운영) 모드에서는 이 엔드포인트 자체가 존재하지 않아, 환경변수 실수나
+//   엔드포인트 노출로 인한 '공짜 무한 충전'이 원천 차단된다.
+if (MODE === "mock") {
+  router.post("/charges/mock-confirm", auth, h(async (req, res) => {
+    const c = await completeCharge(String(req.body.order_no || ""), "mock");
+    if (c.user_id !== req.user.id) return res.status(403).json({ error: "본인 충전 건이 아닙니다." });
+    res.json({ ok: true, amount: c.amount });
+  }));
+}
 
 // 2-b) 토스페이먼츠 결제 승인 (successUrl에서 호출 — 시크릿 키는 서버에서만 사용)
 router.post("/charges/toss-confirm", auth, h(async (req, res) => {

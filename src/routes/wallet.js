@@ -3,6 +3,18 @@ const router = require("express").Router();
 const { q, tx, httpError } = require("../db");
 const { auth, h } = require("../middleware");
 
+// 금액 검증: 문자열/지수표기/소수/음수/과대값을 모두 차단하고 안전한 정수만 통과
+// (예: "1e300" → parseInt이 1로 뭉개는 문제, 오버플로우 방지)
+const MAX_AMOUNT = 100_000_000; // 1억원
+function safeAmount(raw) {
+  if (typeof raw === "number" && !Number.isInteger(raw)) return null; // 0.1 등
+  const s = String(raw).trim();
+  if (!/^[0-9]{1,9}$/.test(s)) return null;                            // 숫자 1~9자리만 (지수·기호·공백 차단)
+  const n = parseInt(s, 10);
+  if (n <= 0 || n > MAX_AMOUNT) return null;
+  return n;
+}
+
 // 잔액이 충분할 때만 차감 (동시성 안전: 조건부 UPDATE — 두 드라이버 공통)
 async function debit(t, userId, amount) {
   const { changes } = await t.run(
@@ -17,9 +29,9 @@ const ledger = (t, fromId, toId, amount, memo) =>
 /* ── 직접 송금 ── */
 router.post("/transfer", auth, h(async (req, res) => {
   const toName = String(req.body.to_name || "").trim();
-  const amount = parseInt(req.body.amount, 10);
+  const amount = safeAmount(req.body.amount);
   const memo = String(req.body.memo || "직접 송금").slice(0, 100);
-  if (!Number.isInteger(amount) || amount <= 0) return res.status(400).json({ error: "금액을 확인해 주세요." });
+  if (!amount) return res.status(400).json({ error: "금액은 1원 이상 1억원 이하의 정수로 입력해 주세요." });
   const to = await q.get("SELECT id, (blocked + dormant) AS blocked FROM users WHERE name = ?", toName);
   if (!to) return res.status(404).json({ error: "받는 사람을 찾을 수 없습니다." });
   if (to.id === req.user.id) return res.status(400).json({ error: "본인에게는 송금할 수 없습니다." });

@@ -107,3 +107,7 @@ nav.tabs button.on .ico { filter: none; }
   .card, .bubble { animation: rise .18s ease-out; }
   @keyframes rise { from { opacity: 0; transform: translateY(4px); } }
 }
+
+/* 외부 링크 피싱 경고 (보안 진단서 §5) */
+.linkwarn { display: block; margin-top: 6px; padding: 7px 10px; border-radius: 9px; font-size: 11px; font-weight: 700; line-height: 1.5; background: #fff3d6; color: #8a5a00; border: 1px solid #f0d9a0; }
+.bubble.me .linkwarn { background: rgba(255,255,255,.92); }

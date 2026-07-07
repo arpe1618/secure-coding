@@ -5,6 +5,16 @@ const { auth, adminOnly, h } = require("../middleware");
 
 router.use(auth, adminOnly);
 
+// 페이징 (진단서 §3: 무제한 반환으로 인한 메모리 고갈/DoS 방지)
+const PAGE_SIZE = 100;
+const MAX_PAGE = 100000; // OFFSET 정수 오버플로우로 인한 500 크래시 방지
+const pageOf = (req) => {
+  let p = parseInt(req.query.page, 10);
+  if (!Number.isFinite(p) || p < 1) p = 1;
+  if (p > MAX_PAGE) p = MAX_PAGE;
+  return (p - 1) * PAGE_SIZE;
+};
+
 // 대시보드 요약 (PG는 COUNT/SUM을 문자열로 반환하므로 Number 처리)
 router.get("/summary", h(async (_req, res) => {
   const n = async (sql) => Number((await q.get(sql)).n);
@@ -20,13 +30,13 @@ router.get("/summary", h(async (_req, res) => {
 }));
 
 // 유저 관리
-router.get("/users", h(async (_req, res) => {
+router.get("/users", h(async (req, res) => {
   res.json({
     users: await q.all(`
       SELECT u.id, u.name, u.balance, u.bio, u.blocked, u.dormant, u.created_at,
         (SELECT COUNT(*) FROM products WHERE seller_id = u.id AND status != 'deleted') AS product_count,
         (SELECT COUNT(*) FROM reports WHERE kind = 'user' AND target_id = u.id) AS report_count
-      FROM users u WHERE is_admin = 0 ORDER BY u.id DESC`),
+      FROM users u WHERE is_admin = 0 ORDER BY u.id DESC LIMIT ${PAGE_SIZE} OFFSET ?`, pageOf(req)),
   });
 }));
 
@@ -47,11 +57,11 @@ router.post("/users/:id/dormant", h(async (req, res) => {
 }));
 
 // 상품 관리
-router.get("/products", h(async (_req, res) => {
+router.get("/products", h(async (req, res) => {
   res.json({
     products: await q.all(`
       SELECT p.*, u.name AS seller_name FROM products p JOIN users u ON u.id = p.seller_id
-      WHERE p.status != 'deleted' ORDER BY p.id DESC`),
+      WHERE p.status != 'deleted' ORDER BY p.id DESC LIMIT ${PAGE_SIZE} OFFSET ?`, pageOf(req)),
   });
 }));
 
@@ -65,14 +75,14 @@ router.post("/products/:id/block", h(async (req, res) => {
 }));
 
 // 신고 관리
-router.get("/reports", h(async (_req, res) => {
+router.get("/reports", h(async (req, res) => {
   res.json({
     reports: await q.all(`
       SELECT r.*, rep.name AS reporter_name,
         CASE r.kind WHEN 'user' THEN (SELECT name FROM users WHERE id = r.target_id)
                     ELSE (SELECT title FROM products WHERE id = r.target_id) END AS target_label
       FROM reports r JOIN users rep ON rep.id = r.reporter_id
-      ORDER BY r.resolved, r.id DESC`),
+      ORDER BY r.resolved, r.id DESC LIMIT ${PAGE_SIZE} OFFSET ?`, pageOf(req)),
   });
 }));
 
@@ -89,13 +99,13 @@ router.post("/reports/:id/resolve", h(async (req, res) => {
 }));
 
 // 주문 관리
-router.get("/orders", h(async (_req, res) => {
+router.get("/orders", h(async (req, res) => {
   res.json({
     orders: await q.all(`
       SELECT o.*, p.title AS product_title, b.name AS buyer_name, s.name AS seller_name
       FROM orders o JOIN products p ON p.id = o.product_id
       JOIN users b ON b.id = o.buyer_id JOIN users s ON s.id = o.seller_id
-      ORDER BY o.id DESC`),
+      ORDER BY o.id DESC LIMIT ${PAGE_SIZE} OFFSET ?`, pageOf(req)),
   });
 }));
 
@@ -115,12 +125,12 @@ router.post("/orders/:id/refund", h(async (req, res) => {
 }));
 
 // 전체 거래 원장
-router.get("/transactions", h(async (_req, res) => {
+router.get("/transactions", h(async (req, res) => {
   res.json({
     transactions: await q.all(`
       SELECT t.*, f.name AS from_name, u.name AS to_name
       FROM transactions t LEFT JOIN users f ON f.id = t.from_id LEFT JOIN users u ON u.id = t.to_id
-      ORDER BY t.id DESC LIMIT 300`),
+      ORDER BY t.id DESC LIMIT ${PAGE_SIZE} OFFSET ?`, pageOf(req)),
   });
 }));
 
