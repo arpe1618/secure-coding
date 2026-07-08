@@ -1,4 +1,4 @@
-# 다시장 (DasiJang) 
+# 다시장 
 ## 시큐어 코딩 과제 - Tiny Second-hand Shopping Platform
 
 > 쓰던 물건이 다시 장터로 — 우리 동네 중고거래 플랫폼
