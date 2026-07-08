@@ -113,7 +113,7 @@ dasijang/
 ├─ public/               # 프론트엔드 (index.html, app.js, style.css)
 ├─ tests/e2e.sh          # 자동 테스트 (49개)
 ├─ docs/
-│  ├─ Security.md         # 보안 패치 내역
+│  ├─ SECURITY.md         # 보안 패치 내역
 │  ├─ TESTING.md          # 테스트 체크리스트·유지보수 가이드
 │  ├─ API.md              # REST API 명세
 │  └─ ARCHITECTURE.md     # 구조 설명
